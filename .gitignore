@@ -1,0 +1,8 @@
+bin/
+obj/
+*.user
+.vs/
+appsettings.Development.json
+firebase-service-account.json
+*.pfx
+*.key
