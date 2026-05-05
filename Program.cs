@@ -8,13 +8,25 @@ using System.Threading.RateLimiting;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// ── Firebase Admin SDK (vérifie les JWT Firebase) ─────────────────────────
-FirebaseApp.Create(new AppOptions
+// ── Firebase Admin SDK ────────────────────────────────────────────────────
+// En production (Render), le JSON du compte de service est dans la variable FIREBASE_SERVICE_ACCOUNT
+var firebaseJson = Environment.GetEnvironmentVariable("FIREBASE_SERVICE_ACCOUNT");
+if (!string.IsNullOrEmpty(firebaseJson))
 {
-    Credential = GoogleCredential.FromJson(
-        File.ReadAllText(builder.Configuration["Firebase:ServiceAccountPath"]
-            ?? "firebase-service-account.json"))
-});
+    FirebaseApp.Create(new AppOptions
+    {
+        Credential = GoogleCredential.FromJson(firebaseJson)
+    });
+}
+else
+{
+    // En local : lire depuis le fichier
+    var path = builder.Configuration["Firebase:ServiceAccountPath"] ?? "firebase-service-account.json";
+    FirebaseApp.Create(new AppOptions
+    {
+        Credential = GoogleCredential.FromJson(File.ReadAllText(path))
+    });
+}
 
 // ── JWT Bearer — valide les tokens Firebase ───────────────────────────────
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)

@@ -71,12 +71,26 @@ namespace MaghrebButusAPI.Services
         // Obtenir un token d'accès depuis le compte de service Firebase
         private async Task<string> GetServiceAccountTokenAsync()
         {
-            var credential = GoogleCredential
-                .FromFile("firebase-service-account.json")
-                .CreateScoped("https://www.googleapis.com/auth/firebase.database",
-                              "https://www.googleapis.com/auth/userinfo.email");
-            var token = await credential.UnderlyingCredential.GetAccessTokenForRequestAsync();
-            return token;
+            GoogleCredential credential;
+
+            // En production (Render) : lire depuis variable d'environnement
+            var json = Environment.GetEnvironmentVariable("FIREBASE_SERVICE_ACCOUNT");
+            if (!string.IsNullOrEmpty(json))
+            {
+                credential = GoogleCredential.FromJson(json)
+                    .CreateScoped("https://www.googleapis.com/auth/firebase.database",
+                                  "https://www.googleapis.com/auth/userinfo.email");
+            }
+            else
+            {
+                // En local : lire depuis le fichier
+                credential = GoogleCredential
+                    .FromFile("firebase-service-account.json")
+                    .CreateScoped("https://www.googleapis.com/auth/firebase.database",
+                                  "https://www.googleapis.com/auth/userinfo.email");
+            }
+
+            return await credential.UnderlyingCredential.GetAccessTokenForRequestAsync();
         }
 
         // Enregistrer la machine dans Firebase (authentifié)
