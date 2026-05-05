@@ -7,7 +7,6 @@ namespace MaghrebButusAPI.Controllers
 {
     [ApiController]
     [Route("api/[controller]")]
-    [Authorize] // JWT requis sur tous les endpoints
     public class MntController : ControllerBase
     {
         private readonly MntService _mnt;
@@ -22,6 +21,7 @@ namespace MaghrebButusAPI.Controllers
         /// POST /api/mnt/calculer
         /// Body: { "machineId": "...", "points": [{x,y,z},...] }
         [HttpPost("calculer")]
+        [AllowAnonymous]
         public async Task<IActionResult> Calculer([FromBody] MntRequest request)
         {
             // Validation basique
