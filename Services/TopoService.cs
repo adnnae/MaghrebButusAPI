@@ -111,25 +111,19 @@ namespace MaghrebButusAPI.Services
             for (int gy = 0; gy <= tilesY; gy++)
                 lats[gy] = TileYToLat(tileMinY + gy, req.Zoom);
 
-            // Convert left and right columns to projected coords IN PARALLEL
+            // Convert left and right columns to projected coords (sequential to avoid MapTiler rate limit)
             double[] leftX = new double[tilesY + 1];
             double[] leftY = new double[tilesY + 1];
             double[] rightX = new double[tilesY + 1];
             double[] rightY = new double[tilesY + 1];
 
-            var tasks = new List<Task>();
             for (int gy = 0; gy <= tilesY; gy++)
             {
-                int idx = gy;
-                tasks.Add(Task.Run(async () =>
-                {
-                    var (lx, ly) = await ConvertFromWGS84(lats[idx], lons[0], req.Epsg);
-                    leftX[idx] = lx; leftY[idx] = ly;
-                    var (rx, ry) = await ConvertFromWGS84(lats[idx], lons[tilesX], req.Epsg);
-                    rightX[idx] = rx; rightY[idx] = ry;
-                }));
+                var (lx, ly) = await ConvertFromWGS84(lats[gy], lons[0], req.Epsg);
+                leftX[gy] = lx; leftY[gy] = ly;
+                var (rx, ry) = await ConvertFromWGS84(lats[gy], lons[tilesX], req.Epsg);
+                rightX[gy] = rx; rightY[gy] = ry;
             }
-            await Task.WhenAll(tasks);
 
             // Fill grid by linear interpolation
             double[,] gridX = new double[tilesY + 1, tilesX + 1];
@@ -339,7 +333,7 @@ namespace MaghrebButusAPI.Services
         }
 
         // ── Helpers ───────────────────────────────────────────────────────────
-        private static readonly SemaphoreSlim _maptilerSemaphore = new(5, 5); // Max 5 concurrent calls
+        private static readonly SemaphoreSlim _maptilerSemaphore = new(3, 3); // Max 3 concurrent calls
 
         private async Task<(double x, double y)> ConvertFromWGS84(double lat, double lon, int epsg)
         {
@@ -347,22 +341,44 @@ namespace MaghrebButusAPI.Services
             try
             {
                 string url = $"https://api.maptiler.com/coordinates/transform/{lon.ToString(CultureInfo.InvariantCulture)},{lat.ToString(CultureInfo.InvariantCulture)}.json?s_srs=4326&t_srs={epsg}&key={_maptilerKey}";
-                var response = await _http.GetAsync(url);
-                var json = await response.Content.ReadAsStringAsync();
 
-                if (!response.IsSuccessStatusCode)
-                    throw new Exception($"MapTiler error {(int)response.StatusCode}: {json}");
+                // Retry up to 3 times on failure
+                for (int attempt = 0; attempt < 3; attempt++)
+                {
+                    var response = await _http.GetAsync(url);
+                    var json = await response.Content.ReadAsStringAsync();
 
-                using var doc = JsonDocument.Parse(json);
-                if (!doc.RootElement.TryGetProperty("results", out var results) || results.GetArrayLength() == 0)
-                    throw new Exception($"MapTiler response missing 'results': {json.Substring(0, Math.Min(200, json.Length))}");
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        if (attempt < 2 && (int)response.StatusCode == 429)
+                        {
+                            await Task.Delay(1000 * (attempt + 1)); // backoff
+                            continue;
+                        }
+                        throw new Exception($"MapTiler error {(int)response.StatusCode}: {json}");
+                    }
 
-                var coord = results[0];
-                return (coord.GetProperty("x").GetDouble(), coord.GetProperty("y").GetDouble());
+                    using var doc = JsonDocument.Parse(json);
+                    if (!doc.RootElement.TryGetProperty("results", out var results) || results.GetArrayLength() == 0)
+                    {
+                        if (attempt < 2)
+                        {
+                            await Task.Delay(500);
+                            continue;
+                        }
+                        throw new Exception($"MapTiler missing 'results': {json.Substring(0, Math.Min(200, json.Length))}");
+                    }
+
+                    var coord = results[0];
+                    return (coord.GetProperty("x").GetDouble(), coord.GetProperty("y").GetDouble());
+                }
+
+                throw new Exception("MapTiler: max retries exceeded");
             }
             finally
             {
                 _maptilerSemaphore.Release();
+                await Task.Delay(50); // small delay between calls
             }
         }
 
