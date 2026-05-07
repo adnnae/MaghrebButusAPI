@@ -21,7 +21,6 @@ namespace MaghrebButusAPI.Services
         {
             var results = new List<ProjectedPoint>();
 
-            // Batch par groupes de 50 pour éviter le rate limiting
             for (int i = 0; i < req.Points.Count; i++)
             {
                 var pt = req.Points[i];
@@ -31,19 +30,31 @@ namespace MaghrebButusAPI.Services
 
                 string url = $"https://api.maptiler.com/coordinates/transform/{coordStr}.json?s_srs={req.SourceEpsg}&t_srs={req.TargetEpsg}&key={_maptilerKey}";
 
-                var response = await _http.GetAsync(url);
-                response.EnsureSuccessStatusCode();
-                var json = await response.Content.ReadAsStringAsync();
-
-                using var doc = JsonDocument.Parse(json);
-                var coord = doc.RootElement.GetProperty("results")[0];
-                results.Add(new ProjectedPoint
+                await _maptilerSemaphore.WaitAsync();
+                try
                 {
-                    X = coord.GetProperty("x").GetDouble(),
-                    Y = coord.GetProperty("y").GetDouble()
-                });
+                    var response = await _http.GetAsync(url);
+                    var json = await response.Content.ReadAsStringAsync();
 
-                // Rate limiting
+                    if (!response.IsSuccessStatusCode)
+                        throw new Exception($"MapTiler error {(int)response.StatusCode} for point {i}: {json}");
+
+                    using var doc = JsonDocument.Parse(json);
+                    if (!doc.RootElement.TryGetProperty("results", out var resArray) || resArray.GetArrayLength() == 0)
+                        throw new Exception($"MapTiler missing 'results' for point {i}: {json.Substring(0, Math.Min(200, json.Length))}");
+
+                    var coord = resArray[0];
+                    results.Add(new ProjectedPoint
+                    {
+                        X = coord.GetProperty("x").GetDouble(),
+                        Y = coord.GetProperty("y").GetDouble()
+                    });
+                }
+                finally
+                {
+                    _maptilerSemaphore.Release();
+                }
+
                 if (i > 0 && i % 50 == 0)
                     await Task.Delay(100);
             }
@@ -328,16 +339,31 @@ namespace MaghrebButusAPI.Services
         }
 
         // ── Helpers ───────────────────────────────────────────────────────────
+        private static readonly SemaphoreSlim _maptilerSemaphore = new(5, 5); // Max 5 concurrent calls
+
         private async Task<(double x, double y)> ConvertFromWGS84(double lat, double lon, int epsg)
         {
-            string url = $"https://api.maptiler.com/coordinates/transform/{lon.ToString(CultureInfo.InvariantCulture)},{lat.ToString(CultureInfo.InvariantCulture)}.json?s_srs=4326&t_srs={epsg}&key={_maptilerKey}";
-            var response = await _http.GetAsync(url);
-            response.EnsureSuccessStatusCode();
-            var json = await response.Content.ReadAsStringAsync();
+            await _maptilerSemaphore.WaitAsync();
+            try
+            {
+                string url = $"https://api.maptiler.com/coordinates/transform/{lon.ToString(CultureInfo.InvariantCulture)},{lat.ToString(CultureInfo.InvariantCulture)}.json?s_srs=4326&t_srs={epsg}&key={_maptilerKey}";
+                var response = await _http.GetAsync(url);
+                var json = await response.Content.ReadAsStringAsync();
 
-            using var doc = JsonDocument.Parse(json);
-            var coord = doc.RootElement.GetProperty("results")[0];
-            return (coord.GetProperty("x").GetDouble(), coord.GetProperty("y").GetDouble());
+                if (!response.IsSuccessStatusCode)
+                    throw new Exception($"MapTiler error {(int)response.StatusCode}: {json}");
+
+                using var doc = JsonDocument.Parse(json);
+                if (!doc.RootElement.TryGetProperty("results", out var results) || results.GetArrayLength() == 0)
+                    throw new Exception($"MapTiler response missing 'results': {json.Substring(0, Math.Min(200, json.Length))}");
+
+                var coord = results[0];
+                return (coord.GetProperty("x").GetDouble(), coord.GetProperty("y").GetDouble());
+            }
+            finally
+            {
+                _maptilerSemaphore.Release();
+            }
         }
 
         private static int LonToTileX(double lon, int zoom) =>
