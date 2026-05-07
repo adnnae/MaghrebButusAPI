@@ -58,8 +58,10 @@ builder.Services.AddRateLimiter(options =>
 
 // ── Services ──────────────────────────────────────────────────────────────
 builder.Services.AddHttpClient<FirebaseAuthService>();
+builder.Services.AddHttpClient("Maptiler");
 builder.Services.AddSingleton<MntService>();
 builder.Services.AddSingleton<CalageService>();
+builder.Services.AddTransient<TopoService>();
 builder.Services.AddControllers()
     .AddJsonOptions(opts =>
         opts.JsonSerializerOptions.PropertyNameCaseInsensitive = true);
