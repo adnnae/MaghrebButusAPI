@@ -12,7 +12,7 @@ namespace MaghrebButusAPI.Services
         public TopoService(IHttpClientFactory httpFactory, IConfiguration config)
         {
             _http = httpFactory.CreateClient("Maptiler");
-            _http.Timeout = TimeSpan.FromSeconds(120);
+            _http.Timeout = TimeSpan.FromSeconds(60);
             _maptilerKey = config["Maptiler:ApiKey"] ?? "xXeDRtXpeuPb7DggheQA";
         }
 
@@ -21,6 +21,7 @@ namespace MaghrebButusAPI.Services
         {
             var results = new List<ProjectedPoint>();
 
+            // Batch par groupes de 50 pour éviter le rate limiting
             for (int i = 0; i < req.Points.Count; i++)
             {
                 var pt = req.Points[i];
@@ -30,31 +31,19 @@ namespace MaghrebButusAPI.Services
 
                 string url = $"https://api.maptiler.com/coordinates/transform/{coordStr}.json?s_srs={req.SourceEpsg}&t_srs={req.TargetEpsg}&key={_maptilerKey}";
 
-                await _maptilerSemaphore.WaitAsync();
-                try
+                var response = await _http.GetAsync(url);
+                response.EnsureSuccessStatusCode();
+                var json = await response.Content.ReadAsStringAsync();
+
+                using var doc = JsonDocument.Parse(json);
+                var coord = doc.RootElement.GetProperty("results")[0];
+                results.Add(new ProjectedPoint
                 {
-                    var response = await _http.GetAsync(url);
-                    var json = await response.Content.ReadAsStringAsync();
+                    X = coord.GetProperty("x").GetDouble(),
+                    Y = coord.GetProperty("y").GetDouble()
+                });
 
-                    if (!response.IsSuccessStatusCode)
-                        throw new Exception($"MapTiler error {(int)response.StatusCode} for point {i}: {json}");
-
-                    using var doc = JsonDocument.Parse(json);
-                    if (!doc.RootElement.TryGetProperty("results", out var resArray) || resArray.GetArrayLength() == 0)
-                        throw new Exception($"MapTiler missing 'results' for point {i}: {json.Substring(0, Math.Min(200, json.Length))}");
-
-                    var coord = resArray[0];
-                    results.Add(new ProjectedPoint
-                    {
-                        X = coord.GetProperty("x").GetDouble(),
-                        Y = coord.GetProperty("y").GetDouble()
-                    });
-                }
-                finally
-                {
-                    _maptilerSemaphore.Release();
-                }
-
+                // Rate limiting
                 if (i > 0 && i % 50 == 0)
                     await Task.Delay(100);
             }
@@ -111,19 +100,28 @@ namespace MaghrebButusAPI.Services
             for (int gy = 0; gy <= tilesY; gy++)
                 lats[gy] = TileYToLat(tileMinY + gy, req.Zoom);
 
-            // Convert left and right columns to projected coords (sequential to avoid MapTiler rate limit)
+            // Convert left and right columns to projected coords (in parallel)
             double[] leftX = new double[tilesY + 1];
             double[] leftY = new double[tilesY + 1];
             double[] rightX = new double[tilesY + 1];
             double[] rightY = new double[tilesY + 1];
 
+            var tasks = new List<Task>();
             for (int gy = 0; gy <= tilesY; gy++)
             {
-                var (lx, ly) = await ConvertFromWGS84(lats[gy], lons[0], req.Epsg);
-                leftX[gy] = lx; leftY[gy] = ly;
-                var (rx, ry) = await ConvertFromWGS84(lats[gy], lons[tilesX], req.Epsg);
-                rightX[gy] = rx; rightY[gy] = ry;
+                int gyLocal = gy;
+                tasks.Add(Task.Run(async () =>
+                {
+                    var (lx, ly) = await ConvertFromWGS84(lats[gyLocal], lons[0], req.Epsg);
+                    leftX[gyLocal] = lx; leftY[gyLocal] = ly;
+                }));
+                tasks.Add(Task.Run(async () =>
+                {
+                    var (rx, ry) = await ConvertFromWGS84(lats[gyLocal], lons[tilesX], req.Epsg);
+                    rightX[gyLocal] = rx; rightY[gyLocal] = ry;
+                }));
             }
+            await Task.WhenAll(tasks);
 
             // Fill grid by linear interpolation
             double[,] gridX = new double[tilesY + 1, tilesX + 1];
@@ -333,53 +331,16 @@ namespace MaghrebButusAPI.Services
         }
 
         // ── Helpers ───────────────────────────────────────────────────────────
-        private static readonly SemaphoreSlim _maptilerSemaphore = new(3, 3); // Max 3 concurrent calls
-
         private async Task<(double x, double y)> ConvertFromWGS84(double lat, double lon, int epsg)
         {
-            await _maptilerSemaphore.WaitAsync();
-            try
-            {
-                string url = $"https://api.maptiler.com/coordinates/transform/{lon.ToString(CultureInfo.InvariantCulture)},{lat.ToString(CultureInfo.InvariantCulture)}.json?s_srs=4326&t_srs={epsg}&key={_maptilerKey}";
+            string url = $"https://api.maptiler.com/coordinates/transform/{lon.ToString(CultureInfo.InvariantCulture)},{lat.ToString(CultureInfo.InvariantCulture)}.json?s_srs=4326&t_srs={epsg}&key={_maptilerKey}";
+            var response = await _http.GetAsync(url);
+            response.EnsureSuccessStatusCode();
+            var json = await response.Content.ReadAsStringAsync();
 
-                // Retry up to 3 times on failure
-                for (int attempt = 0; attempt < 3; attempt++)
-                {
-                    var response = await _http.GetAsync(url);
-                    var json = await response.Content.ReadAsStringAsync();
-
-                    if (!response.IsSuccessStatusCode)
-                    {
-                        if (attempt < 2 && (int)response.StatusCode == 429)
-                        {
-                            await Task.Delay(1000 * (attempt + 1)); // backoff
-                            continue;
-                        }
-                        throw new Exception($"MapTiler error {(int)response.StatusCode}: {json}");
-                    }
-
-                    using var doc = JsonDocument.Parse(json);
-                    if (!doc.RootElement.TryGetProperty("results", out var results) || results.GetArrayLength() == 0)
-                    {
-                        if (attempt < 2)
-                        {
-                            await Task.Delay(500);
-                            continue;
-                        }
-                        throw new Exception($"MapTiler missing 'results': {json.Substring(0, Math.Min(200, json.Length))}");
-                    }
-
-                    var coord = results[0];
-                    return (coord.GetProperty("x").GetDouble(), coord.GetProperty("y").GetDouble());
-                }
-
-                throw new Exception("MapTiler: max retries exceeded");
-            }
-            finally
-            {
-                _maptilerSemaphore.Release();
-                await Task.Delay(50); // small delay between calls
-            }
+            using var doc = JsonDocument.Parse(json);
+            var coord = doc.RootElement.GetProperty("results")[0];
+            return (coord.GetProperty("x").GetDouble(), coord.GetProperty("y").GetDouble());
         }
 
         private static int LonToTileX(double lon, int zoom) =>
