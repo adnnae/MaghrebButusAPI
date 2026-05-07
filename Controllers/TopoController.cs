@@ -37,7 +37,7 @@ namespace MaghrebButusAPI.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(500, new CoordConvertResponse { Success = false, Message = ex.Message });
+                return StatusCode(500, new CoordConvertResponse { Success = false, Message = $"Erreur conversion: {ex.Message}" });
             }
         }
 

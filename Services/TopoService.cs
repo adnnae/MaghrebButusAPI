@@ -19,36 +19,51 @@ namespace MaghrebButusAPI.Services
         // ── Conversion de coordonnées ─────────────────────────────────────────
         public async Task<CoordConvertResponse> ConvertCoordinatesAsync(CoordConvertRequest req)
         {
-            var results = new List<ProjectedPoint>();
+            var results = new ProjectedPoint[req.Points.Count];
 
-            // Batch par groupes de 50 pour éviter le rate limiting
+            // Parallel batch conversion (groups of 10 concurrent)
+            var semaphore = new SemaphoreSlim(10);
+            var tasks = new List<Task>();
+
             for (int i = 0; i < req.Points.Count; i++)
             {
-                var pt = req.Points[i];
-                string coordStr = req.SourceEpsg == 4326
-                    ? $"{pt.Lon.ToString(CultureInfo.InvariantCulture)},{pt.Lat.ToString(CultureInfo.InvariantCulture)}"
-                    : $"{pt.Lat.ToString(CultureInfo.InvariantCulture)},{pt.Lon.ToString(CultureInfo.InvariantCulture)}";
-
-                string url = $"https://api.maptiler.com/coordinates/transform/{coordStr}.json?s_srs={req.SourceEpsg}&t_srs={req.TargetEpsg}&key={_maptilerKey}";
-
-                var response = await _http.GetAsync(url);
-                response.EnsureSuccessStatusCode();
-                var json = await response.Content.ReadAsStringAsync();
-
-                using var doc = JsonDocument.Parse(json);
-                var coord = doc.RootElement.GetProperty("results")[0];
-                results.Add(new ProjectedPoint
+                int idx = i;
+                tasks.Add(Task.Run(async () =>
                 {
-                    X = coord.GetProperty("x").GetDouble(),
-                    Y = coord.GetProperty("y").GetDouble()
-                });
+                    await semaphore.WaitAsync();
+                    try
+                    {
+                        var pt = req.Points[idx];
+                        // MapTiler expects: x,y format (easting,northing for projected; lon,lat for WGS84)
+                        string coordStr = req.SourceEpsg == 4326
+                            ? $"{pt.Lon.ToString(CultureInfo.InvariantCulture)},{pt.Lat.ToString(CultureInfo.InvariantCulture)}"
+                            : $"{pt.Lat.ToString(CultureInfo.InvariantCulture)},{pt.Lon.ToString(CultureInfo.InvariantCulture)}";
 
-                // Rate limiting
-                if (i > 0 && i % 50 == 0)
-                    await Task.Delay(100);
+                        string url = $"https://api.maptiler.com/coordinates/transform/{coordStr}.json?s_srs={req.SourceEpsg}&t_srs={req.TargetEpsg}&key={_maptilerKey}";
+
+                        var response = await _http.GetAsync(url);
+                        var json = await response.Content.ReadAsStringAsync();
+                        if (!response.IsSuccessStatusCode)
+                            throw new Exception($"MapTiler erreur ({(int)response.StatusCode}) pour point [{coordStr}]: {json}");
+
+                        using var doc = JsonDocument.Parse(json);
+                        var coord = doc.RootElement.GetProperty("results")[0];
+                        results[idx] = new ProjectedPoint
+                        {
+                            X = coord.GetProperty("x").GetDouble(),
+                            Y = coord.GetProperty("y").GetDouble()
+                        };
+                    }
+                    finally
+                    {
+                        semaphore.Release();
+                    }
+                }));
             }
 
-            return new CoordConvertResponse { Success = true, Points = results };
+            await Task.WhenAll(tasks);
+
+            return new CoordConvertResponse { Success = true, Points = results.ToList() };
         }
 
         // ── Élévations ────────────────────────────────────────────────────────
