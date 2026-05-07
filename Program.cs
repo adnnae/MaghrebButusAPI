@@ -49,9 +49,9 @@ builder.Services.AddRateLimiter(options =>
 {
     options.AddFixedWindowLimiter("api", limiter =>
     {
-        limiter.PermitLimit = 30;
+        limiter.PermitLimit = 120;
         limiter.Window = TimeSpan.FromMinutes(1);
-        limiter.QueueLimit = 0;
+        limiter.QueueLimit = 5;
     });
     options.RejectionStatusCode = 429;
 });
