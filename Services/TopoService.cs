@@ -12,7 +12,7 @@ namespace MaghrebButusAPI.Services
         public TopoService(IHttpClientFactory httpFactory, IConfiguration config)
         {
             _http = httpFactory.CreateClient("Maptiler");
-            _http.Timeout = TimeSpan.FromSeconds(30);
+            _http.Timeout = TimeSpan.FromSeconds(120);
             _maptilerKey = config["Maptiler:ApiKey"] ?? "xXeDRtXpeuPb7DggheQA";
         }
 
@@ -100,19 +100,25 @@ namespace MaghrebButusAPI.Services
             for (int gy = 0; gy <= tilesY; gy++)
                 lats[gy] = TileYToLat(tileMinY + gy, req.Zoom);
 
-            // Convert left and right columns to projected coords
+            // Convert left and right columns to projected coords IN PARALLEL
             double[] leftX = new double[tilesY + 1];
             double[] leftY = new double[tilesY + 1];
             double[] rightX = new double[tilesY + 1];
             double[] rightY = new double[tilesY + 1];
 
+            var tasks = new List<Task>();
             for (int gy = 0; gy <= tilesY; gy++)
             {
-                var (lx, ly) = await ConvertFromWGS84(lats[gy], lons[0], req.Epsg);
-                leftX[gy] = lx; leftY[gy] = ly;
-                var (rx, ry) = await ConvertFromWGS84(lats[gy], lons[tilesX], req.Epsg);
-                rightX[gy] = rx; rightY[gy] = ry;
+                int idx = gy;
+                tasks.Add(Task.Run(async () =>
+                {
+                    var (lx, ly) = await ConvertFromWGS84(lats[idx], lons[0], req.Epsg);
+                    leftX[idx] = lx; leftY[idx] = ly;
+                    var (rx, ry) = await ConvertFromWGS84(lats[idx], lons[tilesX], req.Epsg);
+                    rightX[idx] = rx; rightY[idx] = ry;
+                }));
             }
+            await Task.WhenAll(tasks);
 
             // Fill grid by linear interpolation
             double[,] gridX = new double[tilesY + 1, tilesX + 1];
