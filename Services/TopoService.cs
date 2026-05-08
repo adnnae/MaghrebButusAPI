@@ -60,7 +60,15 @@ namespace MaghrebButusAPI.Services
                 string lons = string.Join(",", batch.Select(p => p.Lon.ToString(CultureInfo.InvariantCulture)));
 
                 string url = $"https://api.open-meteo.com/v1/elevation?latitude={lats}&longitude={lons}";
-                var response = await _http.GetAsync(url);
+
+                // Retry with backoff for 429 errors
+                HttpResponseMessage response = null;
+                for (int retry = 0; retry < 5; retry++)
+                {
+                    response = await _http.GetAsync(url);
+                    if ((int)response.StatusCode != 429) break;
+                    await Task.Delay(1000 * (retry + 1)); // 1s, 2s, 3s, 4s, 5s
+                }
                 response.EnsureSuccessStatusCode();
                 var json = await response.Content.ReadAsStringAsync();
 
@@ -69,7 +77,7 @@ namespace MaghrebButusAPI.Services
                     allElevations.Add(el.GetDouble());
 
                 if (end < req.Points.Count)
-                    await Task.Delay(200);
+                    await Task.Delay(500); // Increased delay between batches
             }
 
             return new ElevationResponse { Success = true, Elevations = allElevations };
