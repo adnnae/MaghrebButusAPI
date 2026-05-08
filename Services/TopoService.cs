@@ -48,6 +48,24 @@ namespace MaghrebButusAPI.Services
         // ── Élévations ────────────────────────────────────────────────────────
         public async Task<ElevationResponse> GetElevationsAsync(ElevationRequest req)
         {
+            // Try Open-Meteo first, fallback to AWS Terrarium on 429
+            try
+            {
+                return await GetElevationsOpenMeteoAsync(req);
+            }
+            catch (HttpRequestException ex) when (ex.Message.Contains("429"))
+            {
+                // Fallback: use AWS Terrarium tiles
+                return await GetElevationsFromTerrainAsync(req);
+            }
+            catch (Exception ex) when (ex.Message.Contains("429"))
+            {
+                return await GetElevationsFromTerrainAsync(req);
+            }
+        }
+
+        private async Task<ElevationResponse> GetElevationsOpenMeteoAsync(ElevationRequest req)
+        {
             var allElevations = new List<double>();
             int batchSize = 100;
 
@@ -61,14 +79,10 @@ namespace MaghrebButusAPI.Services
 
                 string url = $"https://api.open-meteo.com/v1/elevation?latitude={lats}&longitude={lons}";
 
-                // Retry with backoff for 429 errors
-                HttpResponseMessage response = null;
-                for (int retry = 0; retry < 5; retry++)
-                {
-                    response = await _http.GetAsync(url);
-                    if ((int)response.StatusCode != 429) break;
-                    await Task.Delay(1000 * (retry + 1)); // 1s, 2s, 3s, 4s, 5s
-                }
+                var response = await _http.GetAsync(url);
+                if ((int)response.StatusCode == 429)
+                    throw new HttpRequestException("429 Too Many Requests");
+
                 response.EnsureSuccessStatusCode();
                 var json = await response.Content.ReadAsStringAsync();
 
@@ -77,10 +91,57 @@ namespace MaghrebButusAPI.Services
                     allElevations.Add(el.GetDouble());
 
                 if (end < req.Points.Count)
-                    await Task.Delay(500); // Increased delay between batches
+                    await Task.Delay(500);
             }
 
             return new ElevationResponse { Success = true, Elevations = allElevations };
+        }
+
+        /// <summary>
+        /// Fallback: get elevation from AWS Terrarium tiles (free, no rate limit)
+        /// </summary>
+        private async Task<ElevationResponse> GetElevationsFromTerrainAsync(ElevationRequest req)
+        {
+            var elevations = new List<double>();
+            int zoom = 12; // ~30m resolution
+
+            foreach (var pt in req.Points)
+            {
+                int tileX = (int)Math.Floor((pt.Lon + 180.0) / 360.0 * (1 << zoom));
+                double latRad = pt.Lat * Math.PI / 180.0;
+                int tileY = (int)Math.Floor((1.0 - Math.Log(Math.Tan(latRad) + 1.0 / Math.Cos(latRad)) / Math.PI) / 2.0 * (1 << zoom));
+
+                string url = $"https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{zoom}/{tileX}/{tileY}.png";
+                var response = await _http.GetAsync(url);
+                if (!response.IsSuccessStatusCode)
+                {
+                    elevations.Add(0);
+                    continue;
+                }
+
+                var bytes = await response.Content.ReadAsByteArrayAsync();
+                using var ms = new MemoryStream(bytes);
+                using var bmp = new System.Drawing.Bitmap(ms);
+
+                // Calculate pixel position within tile
+                double n = 1 << zoom;
+                double tileLonLeft = tileX / n * 360.0 - 180.0;
+                double tileLonRight = (tileX + 1) / n * 360.0 - 180.0;
+                double tileLatTop = Math.Atan(Math.Sinh(Math.PI * (1 - 2.0 * tileY / n))) * 180.0 / Math.PI;
+                double tileLatBottom = Math.Atan(Math.Sinh(Math.PI * (1 - 2.0 * (tileY + 1) / n))) * 180.0 / Math.PI;
+
+                int px = (int)((pt.Lon - tileLonLeft) / (tileLonRight - tileLonLeft) * 256);
+                int py = (int)((tileLatTop - pt.Lat) / (tileLatTop - tileLatBottom) * 256);
+                px = Math.Clamp(px, 0, 255);
+                py = Math.Clamp(py, 0, 255);
+
+                var pixel = bmp.GetPixel(px, py);
+                // Terrarium encoding: altitude = (R×256 + G + B/256) - 32768
+                double alt = (pixel.R * 256.0 + pixel.G + pixel.B / 256.0) - 32768.0;
+                elevations.Add(Math.Round(alt, 1));
+            }
+
+            return new ElevationResponse { Success = true, Elevations = elevations };
         }
 
         // ── Grille de tuiles satellite ────────────────────────────────────────
