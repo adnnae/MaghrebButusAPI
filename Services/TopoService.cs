@@ -7,14 +7,12 @@ namespace MaghrebButusAPI.Services
     public class TopoService
     {
         private readonly HttpClient _http;
-        private readonly string _maptilerKey;
         private readonly ProjectionService _proj;
 
         public TopoService(IHttpClientFactory httpFactory, IConfiguration config, ProjectionService proj)
         {
             _http = httpFactory.CreateClient("Maptiler");
             _http.Timeout = TimeSpan.FromSeconds(60);
-            _maptilerKey = config["Maptiler:ApiKey"] ?? "xXeDRtXpeuPb7DggheQA";
             _proj = proj;
         }
 
@@ -213,7 +211,7 @@ namespace MaghrebButusAPI.Services
 
                     tiles.Add(new TileInfo
                     {
-                        TileUrl = $"https://api.maptiler.com/tiles/satellite-v2/{req.Zoom}/{tileXCoord}/{tileYCoord}.jpg?key={_maptilerKey}",
+                        TileUrl = $"https://mt1.google.com/vt/lyrs=s&x={tileXCoord}&y={tileYCoord}&z={req.Zoom}",
                         OriginX = blX, OriginY = blY,
                         UX = brX - blX, UY = brY - blY,
                         VX = tlX - blX, VY = tlY - blY
