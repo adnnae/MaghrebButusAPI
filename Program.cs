@@ -48,6 +48,7 @@ builder.Services.AddHttpClient<FirebaseAuthService>();
 builder.Services.AddHttpClient("Maptiler");
 builder.Services.AddSingleton<MntService>();
 builder.Services.AddSingleton<CalageService>();
+builder.Services.AddSingleton<ProjectionService>();
 builder.Services.AddTransient<TopoService>();
 builder.Services.AddControllers()
     .AddJsonOptions(opts =>

@@ -8,62 +8,41 @@ namespace MaghrebButusAPI.Services
     {
         private readonly HttpClient _http;
         private readonly string _maptilerKey;
+        private readonly ProjectionService _proj;
 
-        public TopoService(IHttpClientFactory httpFactory, IConfiguration config)
+        public TopoService(IHttpClientFactory httpFactory, IConfiguration config, ProjectionService proj)
         {
             _http = httpFactory.CreateClient("Maptiler");
             _http.Timeout = TimeSpan.FromSeconds(60);
             _maptilerKey = config["Maptiler:ApiKey"] ?? "xXeDRtXpeuPb7DggheQA";
+            _proj = proj;
         }
 
-        // ── Conversion de coordonnées ─────────────────────────────────────────
+        // ── Conversion de coordonnées (ProjNet — local, gratuit, sans réseau) ──
         public async Task<CoordConvertResponse> ConvertCoordinatesAsync(CoordConvertRequest req)
         {
-            var results = new ProjectedPoint[req.Points.Count];
+            var results = new List<ProjectedPoint>(req.Points.Count);
 
-            // Parallel batch conversion (groups of 10 concurrent)
-            var semaphore = new SemaphoreSlim(10);
-            var tasks = new List<Task>();
-
-            for (int i = 0; i < req.Points.Count; i++)
+            try
             {
-                int idx = i;
-                tasks.Add(Task.Run(async () =>
+                foreach (var pt in req.Points)
                 {
-                    await semaphore.WaitAsync();
-                    try
-                    {
-                        var pt = req.Points[idx];
-                        // MapTiler expects: x,y format (easting,northing for projected; lon,lat for WGS84)
-                        string coordStr = req.SourceEpsg == 4326
-                            ? $"{pt.Lon.ToString(CultureInfo.InvariantCulture)},{pt.Lat.ToString(CultureInfo.InvariantCulture)}"
-                            : $"{pt.Lat.ToString(CultureInfo.InvariantCulture)},{pt.Lon.ToString(CultureInfo.InvariantCulture)}";
+                    // ProjNet: pour WGS84 (géographique) on passe (lon, lat)
+                    // Pour les systèmes projetés on passe (x, y) = (Lat, Lon) dans notre modèle
+                    double inputX = req.SourceEpsg == 4326 ? pt.Lon : pt.Lat;
+                    double inputY = req.SourceEpsg == 4326 ? pt.Lat : pt.Lon;
 
-                        string url = $"https://api.maptiler.com/coordinates/transform/{coordStr}.json?s_srs={req.SourceEpsg}&t_srs={req.TargetEpsg}&key={_maptilerKey}";
+                    var (outX, outY) = _proj.Transform(inputX, inputY, req.SourceEpsg, req.TargetEpsg);
 
-                        var response = await _http.GetAsync(url);
-                        var json = await response.Content.ReadAsStringAsync();
-                        if (!response.IsSuccessStatusCode)
-                            throw new Exception($"MapTiler erreur ({(int)response.StatusCode}) pour point [{coordStr}]: {json}");
-
-                        using var doc = JsonDocument.Parse(json);
-                        var coord = doc.RootElement.GetProperty("results")[0];
-                        results[idx] = new ProjectedPoint
-                        {
-                            X = coord.GetProperty("x").GetDouble(),
-                            Y = coord.GetProperty("y").GetDouble()
-                        };
-                    }
-                    finally
-                    {
-                        semaphore.Release();
-                    }
-                }));
+                    results.Add(new ProjectedPoint { X = outX, Y = outY });
+                }
+            }
+            catch (Exception ex)
+            {
+                return new CoordConvertResponse { Success = false, Message = $"Erreur projection: {ex.Message}" };
             }
 
-            await Task.WhenAll(tasks);
-
-            return new CoordConvertResponse { Success = true, Points = results.ToList() };
+            return await Task.FromResult(new CoordConvertResponse { Success = true, Points = results });
         }
 
         // ── Élévations ────────────────────────────────────────────────────────
@@ -346,16 +325,11 @@ namespace MaghrebButusAPI.Services
         }
 
         // ── Helpers ───────────────────────────────────────────────────────────
-        private async Task<(double x, double y)> ConvertFromWGS84(double lat, double lon, int epsg)
+        private Task<(double x, double y)> ConvertFromWGS84(double lat, double lon, int epsg)
         {
-            string url = $"https://api.maptiler.com/coordinates/transform/{lon.ToString(CultureInfo.InvariantCulture)},{lat.ToString(CultureInfo.InvariantCulture)}.json?s_srs=4326&t_srs={epsg}&key={_maptilerKey}";
-            var response = await _http.GetAsync(url);
-            response.EnsureSuccessStatusCode();
-            var json = await response.Content.ReadAsStringAsync();
-
-            using var doc = JsonDocument.Parse(json);
-            var coord = doc.RootElement.GetProperty("results")[0];
-            return (coord.GetProperty("x").GetDouble(), coord.GetProperty("y").GetDouble());
+            // ProjNet local — pas d'appel réseau
+            var (x, y) = _proj.Transform(lon, lat, 4326, epsg);
+            return Task.FromResult((x, y));
         }
 
         private static int LonToTileX(double lon, int zoom) =>
