@@ -204,12 +204,12 @@ namespace MaghrebButusAPI.Services
             int totalH = tilesY * tileSize;
             double[,] elevation = new double[totalH, totalW];
 
-            // Download terrain tiles
+            // Download terrain tiles (AWS Terrarium - gratuit, sans clé)
             for (int ty = tileMinY; ty <= tileMaxY; ty++)
             {
                 for (int tx = tileMinX; tx <= tileMaxX; tx++)
                 {
-                    string url = $"https://api.maptiler.com/tiles/terrain-rgb-v2/{zoom}/{tx}/{ty}.png?key={_maptilerKey}";
+                    string url = $"https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{zoom}/{tx}/{ty}.png";
                     var response = await _http.GetAsync(url);
                     response.EnsureSuccessStatusCode();
                     var bytes = await response.Content.ReadAsByteArrayAsync();
@@ -217,7 +217,7 @@ namespace MaghrebButusAPI.Services
                     int offsetX = (tx - tileMinX) * tileSize;
                     int offsetY = (ty - tileMinY) * tileSize;
 
-                    // Decode terrain-RGB PNG
+                    // Decode Terrarium PNG: altitude = (R×256 + G + B/256) - 32768
                     using var ms = new MemoryStream(bytes);
                     using var bmp = new System.Drawing.Bitmap(ms);
 
@@ -226,7 +226,7 @@ namespace MaghrebButusAPI.Services
                         for (int px = 0; px < Math.Min(bmp.Width, tileSize); px++)
                         {
                             var pixel = bmp.GetPixel(px, py);
-                            double alt = -10000.0 + (pixel.R * 256.0 * 256.0 + pixel.G * 256.0 + pixel.B) * 0.1;
+                            double alt = (pixel.R * 256.0 + pixel.G + pixel.B / 256.0) - 32768.0;
                             int gx = offsetX + px;
                             int gy = offsetY + py;
                             if (gx < totalW && gy < totalH)
