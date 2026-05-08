@@ -118,8 +118,7 @@ namespace MaghrebButusAPI.Services
                 }
 
                 var bytes = await response.Content.ReadAsByteArrayAsync();
-                using var ms = new MemoryStream(bytes);
-                using var bmp = new System.Drawing.Bitmap(ms);
+                using var img = SixLabors.ImageSharp.Image.Load<SixLabors.ImageSharp.PixelFormats.Rgba32>(bytes);
 
                 // Calculate pixel position within tile
                 double n = 1 << zoom;
@@ -133,7 +132,7 @@ namespace MaghrebButusAPI.Services
                 px = Math.Clamp(px, 0, 255);
                 py = Math.Clamp(py, 0, 255);
 
-                var pixel = bmp.GetPixel(px, py);
+                var pixel = img[px, py];
                 // Terrarium encoding: altitude = (R×256 + G + B/256) - 32768
                 double alt = (pixel.R * 256.0 + pixel.G + pixel.B / 256.0) - 32768.0;
                 elevations.Add(Math.Round(alt, 1));
@@ -263,15 +262,14 @@ namespace MaghrebButusAPI.Services
                     int offsetX = (tx - tileMinX) * tileSize;
                     int offsetY = (ty - tileMinY) * tileSize;
 
-                    // Decode Terrarium PNG: altitude = (R×256 + G + B/256) - 32768
-                    using var ms = new MemoryStream(bytes);
-                    using var bmp = new System.Drawing.Bitmap(ms);
+                    // Decode Terrarium PNG with ImageSharp (cross-platform)
+                    using var img = SixLabors.ImageSharp.Image.Load<SixLabors.ImageSharp.PixelFormats.Rgba32>(bytes);
 
-                    for (int py = 0; py < Math.Min(bmp.Height, tileSize); py++)
+                    for (int py = 0; py < Math.Min(img.Height, tileSize); py++)
                     {
-                        for (int px = 0; px < Math.Min(bmp.Width, tileSize); px++)
+                        for (int px = 0; px < Math.Min(img.Width, tileSize); px++)
                         {
-                            var pixel = bmp.GetPixel(px, py);
+                            var pixel = img[px, py];
                             double alt = (pixel.R * 256.0 + pixel.G + pixel.B / 256.0) - 32768.0;
                             int gx = offsetX + px;
                             int gy = offsetY + py;
