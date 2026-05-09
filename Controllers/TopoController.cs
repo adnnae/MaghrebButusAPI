@@ -123,9 +123,11 @@ namespace MaghrebButusAPI.Controllers
 
             var principal = _firebase.VerifierSessionToken(sessionToken);
             if (principal == null)
-                return Unauthorized(new { success = false, message = "Session expirée. Relancez le plugin." });
+                return Unauthorized(new { success = false, message = "Session expirée. Relancez l'application." });
 
-            if (!_firebase.TokenAutoriseFonction(principal, fonction))
+            // Accept either 'topo' or 'hydraproject' for topo endpoints
+            if (!_firebase.TokenAutoriseFonction(principal, fonction)
+                && !_firebase.TokenAutoriseFonction(principal, "hydraproject"))
                 return Unauthorized(new { success = false, message = $"Fonction '{fonction}' non incluse dans votre licence." });
 
             return null;
